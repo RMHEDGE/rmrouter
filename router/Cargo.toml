@@ -1,0 +1,12 @@
+[package]
+name = "rmrouter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+http-body-util = "0.1.2"
+hyper = { version = "1.4.1", features = ["full"] }
+hyper-util = { version = "0.1.7", features = ["full"] }
+serde = { version = "1.0.208", features = ["derive"] }
+tokio = { version = "1.39.3", features = ["full"] }
