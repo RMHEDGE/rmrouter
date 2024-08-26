@@ -1,38 +1,98 @@
+use helpers::{get_inner_type, preamble, RouteInfo};
 use proc_macro::TokenStream;
-use syn::parse_macro_input;
+use syn::{parse_macro_input, DeriveInput};
 
-mod meta;
+mod helpers;
 
 #[proc_macro_attribute]
-pub fn worked(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let meta = parse_macro_input!(item as meta::Meta);
+pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
+    let it = item.clone();
+    let meta = parse_macro_input!(it as helpers::Meta);
+    
+    let (_, name, _, arg, _, ret, _, _) =
+    (meta.0, meta.1, meta.2, meta.3, meta.4, meta.5, meta.6, meta.7);
+    
+    let info = RouteInfo::parse(annot.into(), name.to_string()).unwrap();
+    let (path, idempotent) = (info.path, info.is_idempotent);
 
-    let attr = parse_macro_input!(attr as syn::LitStr);
-    let path = attr.value();
+    let method = match idempotent {
+        true => "PUT",
+        false => "POST"
+    };
 
-    let (vis, name, generics, arg, arg_name, ret, clause, block) =
-        (meta.0, meta.1, meta.2, meta.3, meta.4, meta.5, meta.6, meta.7);
-
+    let ret = get_inner_type(ret);
     let struct_name = quote::format_ident!("Endpoint{}{}", name.to_string().split_at(1).0.to_uppercase(), name.to_string().split_at(1).1);
-    let quiet_name_string = struct_name.to_string();
 
+    let base: proc_macro2::TokenStream = item.into();
     quote::quote! {
-        pub fn #struct_name #generics(i__: Vec<u8>) -> js_sys::Array #clause {
-            let #arg_name: #arg = bincode::decode_from_slice(&i__, bincode::config::standard()).unwrap().0;
-            let res = #block;
-            
-            let array = js_sys::Array::new();
-            for item in bincode::encode_to_vec(&res, bincode::config::standard()).unwrap() {
-                array.push(&JsValue::from(item));
+        #[doc = concat!("Endpoint Struct for [", stringify!(#name) ,"]\n@ ", stringify!(#method), " /", stringify!(#path), " -> ", stringify!(#struct_name), "::Data ([", stringify!(#ret), "])")]
+        pub struct #struct_name;
+
+        impl Endpoint for #struct_name {
+            type Data = #arg;
+            type Returns = #ret;
+
+            fn path() -> String { #path.to_string() }
+            fn is_idempotent() -> bool { #idempotent }
+
+            fn handler() -> fn(Self::Data) -> anyhow::Result<Self::Returns> {
+                #name
             }
-
-            array
         }
 
-        #vis async fn #name #generics(i: #arg, c: impl Fn(#ret) + 'static) #clause  {
-            let w = WrappedWorker::<#arg, #ret>::new(#path).await;
-            w.run_task(#quiet_name_string, i, c);
-        }
+        #[doc(r"Endpoint Handler for [#name]\n@ #method /#name -> #struct_name::Data ([#arg])")]
+        #base
+        
     }
     .into()
+
+}
+
+
+#[proc_macro_derive(Router)]
+pub fn router(item: TokenStream) -> TokenStream {
+    let (_, name, data) = preamble(parse_macro_input!(item as DeriveInput));
+    
+    let paths: Vec<proc_macro2::TokenStream> = data.variants.iter().map(|variant| {
+        let inner = &variant.fields.iter().next().expect(&format!("No endpoint specified for {}", variant.ident)).ty;
+        let inner_name = &variant.ident;
+        
+        quote::quote! {
+            (path, i) if i == #inner::is_idempotent() && path == #inner::path() => ({
+                let bytes = req.collect().await.expect(&format!("Failed to read incoming bytes for {}", stringify!(#inner_name))).to_bytes();
+                let body: <#inner as Endpoint>::Data = serde_json::from_str(&String::from_utf8_lossy(&bytes[..]).to_string()).expect(&format!("Failed to deserialize body for {}", stringify!(#inner_name)));
+                let response = match #inner::handler()(body) {
+                    Ok(t) => t,
+                    Err(e) => return Ok(
+                        hyper::Response::builder()
+                            .status(400)
+                            .body(http_body_util::Full::new(bytes::Bytes::from(e.to_string())))
+                            .unwrap()
+                    )
+                };
+
+                let bytes = serde_json::to_string(&response).expect(&format!("Failed to serialize response for {}", stringify!(#inner_name)));
+                hyper::Response::builder().status(200).body(http_body_util::Full::new(bytes::Bytes::from(bytes))).unwrap()
+            })
+        }
+
+    }).collect::<Vec<_>>();
+
+    TokenStream::from(quote::quote! {
+
+        impl #name {
+            pub async fn route(req: hyper::Request<hyper::body::Incoming>) -> std::result::Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
+                use http_body_util::BodyExt;
+                let path = req.uri().path().to_string();
+                Ok(match (path, req.method().is_idempotent()) {
+                    #(#paths)*,
+                    _ => hyper::Response::builder()
+                        .status(404)
+                        .body(http_body_util::Full::default())
+                        .unwrap()
+                })
+            }
+        }
+
+    })
 }

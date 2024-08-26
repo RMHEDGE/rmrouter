@@ -23,3 +23,21 @@ pub trait Endpoint {
 
     fn handler() -> fn(Self::Data) -> Result<Self::Returns>;
 }
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use macros::*;
+
+    #[endpoint(idempotent, path = "/greet")]
+    pub fn greet(name: String) -> Result<String> {
+        Ok(format!("Hello, {}!", name))
+    }
+
+    #[allow(dead_code)]
+    #[derive(Router)]
+    pub enum Router {
+        Greet(EndpointGreet)
+    }
+}
