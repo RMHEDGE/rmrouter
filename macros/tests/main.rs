@@ -2,6 +2,7 @@ use std::future::Future;
 
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Serialize};
+use tokio;
 
 #[doc(hidden)]
 #[allow(non_snake_case)]

@@ -23,10 +23,12 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .await
             {
                 eprintln!("Failed to serve conn: {err:?}")
-            }
+            };
         });
     }
 }
+
+
 
 #[endpoint(path = "/sum")]
 pub fn add(data: (i8, i8)) -> Result<i8> {

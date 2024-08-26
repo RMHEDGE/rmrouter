@@ -61,18 +61,20 @@ pub fn router(item: TokenStream) -> TokenStream {
             (path, i) if i == #inner::is_idempotent() && path == #inner::path() => ({
                 let bytes = req.collect().await.expect(&format!("Failed to read incoming bytes for {}", stringify!(#inner_name))).to_bytes();
                 let body: <#inner as Endpoint>::Data = serde_json::from_str(&String::from_utf8_lossy(&bytes[..]).to_string()).expect(&format!("Failed to deserialize body for {}", stringify!(#inner_name)));
-                let response = match #inner::handler()(body) {
-                    Ok(t) => t,
-                    Err(e) => return Ok(
-                        hyper::Response::builder()
+                match #inner::handler()(body) {
+                    Ok(response) => {
+                        let bytes = serde_json::to_string(&response).expect(&format!("Failed to serialize response for {}", stringify!(#inner_name)));
+                        return hyper::Response::builder()
+                            .status(200)
+                            .body(http_body_util::Full::new(bytes::Bytes::from(bytes)))
+                            .unwrap()
+                    },
+                    Err(e) => 
+                        return hyper::Response::builder()
                             .status(400)
                             .body(http_body_util::Full::new(bytes::Bytes::from(e.to_string())))
                             .unwrap()
-                    )
                 };
-
-                let bytes = serde_json::to_string(&response).expect(&format!("Failed to serialize response for {}", stringify!(#inner_name)));
-                hyper::Response::builder().status(200).body(http_body_util::Full::new(bytes::Bytes::from(bytes))).unwrap()
             })
         }
 
@@ -83,13 +85,35 @@ pub fn router(item: TokenStream) -> TokenStream {
         impl #name {
             pub async fn route(req: hyper::Request<hyper::body::Incoming>) -> std::result::Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
                 use http_body_util::BodyExt;
+                use std::error::Error;
+
                 let path = req.uri().path().to_string();
-                Ok(match (path, req.method().is_idempotent()) {
-                    #(#paths)*,
-                    _ => hyper::Response::builder()
-                        .status(404)
-                        .body(http_body_util::Full::default())
-                        .unwrap()
+
+                Ok(match tokio::task::spawn(async move {
+                    match (path, req.method().is_idempotent()) {
+                        #(#paths)*,
+                        _ => return hyper::Response::builder()
+                                .status(404)
+                                .body(http_body_util::Full::default())
+                                .unwrap()
+                    }
+                }).await {
+                    Ok(inner) => inner,
+                    Err(err) => {
+
+                        let err = err.into_panic();
+
+                        let value = err
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or(err.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or("[Unexpected Error]".to_string());
+                            
+                        hyper::Response::builder()
+                            .status(500)
+                            .body(http_body_util::Full::new(bytes::Bytes::from(format!("{:?}", value))))
+                            .unwrap()
+                    }
                 })
             }
         }
