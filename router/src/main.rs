@@ -28,10 +28,8 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
-
-
 #[endpoint(path = "/sum")]
-pub fn add(data: (i8, i8)) -> Result<i8> {
+pub async fn add(data: (i8, i8)) -> Result<i8> {
     data.0
         .checked_add(data.1)
         .ok_or(anyhow!("Failed to add {} & {}", data.0, data.1))

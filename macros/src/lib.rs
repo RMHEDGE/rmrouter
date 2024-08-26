@@ -35,8 +35,8 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
             fn path() -> String { #path.to_string() }
             fn is_idempotent() -> bool { #idempotent }
 
-            fn handler() -> fn(Self::Data) -> anyhow::Result<Self::Returns> {
-                #name
+            fn handler() -> AsyncPtr<Self::Data, anyhow::Result<Self::Returns>> {
+                AsyncPtr::<Self::Data, anyhow::Result<Self::Returns>>::new(#name)
             }
         }
 
@@ -61,7 +61,7 @@ pub fn router(item: TokenStream) -> TokenStream {
             (path, i) if i == #inner::is_idempotent() && path == #inner::path() => ({
                 let bytes = req.collect().await.expect(&format!("Failed to read incoming bytes for {}", stringify!(#inner_name))).to_bytes();
                 let body: <#inner as Endpoint>::Data = serde_json::from_str(&String::from_utf8_lossy(&bytes[..]).to_string()).expect(&format!("Failed to deserialize body for {}", stringify!(#inner_name)));
-                match #inner::handler()(body) {
+                match #inner::handler().run(body).await {
                     Ok(response) => {
                         let bytes = serde_json::to_string(&response).expect(&format!("Failed to serialize response for {}", stringify!(#inner_name)));
                         return hyper::Response::builder()

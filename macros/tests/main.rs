@@ -1,6 +1,7 @@
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
+use futures::future::BoxFuture;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio;
 
@@ -10,21 +11,44 @@ pub async fn NOAUTH() -> bool {
     true
 }
 
+#[derive(Clone)]
+pub struct AsyncPtr<I, R>(Arc<Box<dyn Fn(I) -> BoxFuture<'static, R> + Send + 'static>>);
+
+unsafe impl<I, R> Send for AsyncPtr<I, R> {}
+unsafe impl<I, R> Sync for AsyncPtr<I, R> {}
+
+impl<I, R> AsyncPtr<I, R> {
+    pub fn new<I2, R2>(f: fn(I2) -> R2) -> AsyncPtr<I2, R2::Output>
+    where
+        R2: Future<Output = R> + Send + 'static,
+        I2: 'static,
+    {
+        AsyncPtr(Arc::new(Box::new(move |i: I2| Box::pin(f(i)))))
+    }
+
+    pub async fn run(&self, i: I) -> R {
+        (self.0)(i).await
+    }
+}
+
 pub trait Endpoint {
     type Data: DeserializeOwned;
     type Returns: Serialize;
 
-    fn is_idempotent() -> bool { false }
-    fn path() -> String { String::new() }    
+    fn is_idempotent() -> bool {
+        false
+    }
+    fn path() -> String {
+        String::new()
+    }
 
     #[allow(unused_variables)]
     fn auth(auth_header: Option<String>) -> impl Future<Output = bool> {
         NOAUTH()
     }
 
-    fn handler() -> fn(Self::Data) -> Result<Self::Returns>;
+    fn handler() -> AsyncPtr<Self::Data, Result<Self::Returns>>;
 }
-
 
 #[cfg(test)]
 mod test {
@@ -32,13 +56,13 @@ mod test {
     use macros::*;
 
     #[endpoint(idempotent, path = "/greet")]
-    pub fn greet(name: String) -> Result<String> {
+    pub async fn greet(name: String) -> Result<String> {
         Ok(format!("Hello, {}!", name))
     }
 
     #[allow(dead_code)]
     #[derive(Router)]
     pub enum Router {
-        Greet(EndpointGreet)
+        Greet(EndpointGreet),
     }
 }

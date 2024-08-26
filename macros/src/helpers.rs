@@ -26,6 +26,7 @@ impl Parse for Meta {
         */
 
         let vis = input.parse::<Visibility>()?;
+        let _ = input.parse::<Token![async]>()?;
         let _ = input.parse::<Token![fn]>()?;
         let name = input.parse::<Ident>()?;
         let generics = input.parse::<Generics>()?;
