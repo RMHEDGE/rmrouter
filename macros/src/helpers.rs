@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use quote::format_ident;
 use syn::{
     parse::{Parse, ParseStream},
     spanned::Spanned,
@@ -80,12 +81,12 @@ pub fn get_inner_type(t: Type) -> Type {
 #[allow(unused_variables)]
 #[derive(Debug)]
 pub struct RouteInfo {
-    pub path: String,
     pub is_idempotent: bool,
+    pub auth: Ident,
 }
 
 impl RouteInfo {
-    pub fn parse(tokens: proc_macro2::TokenStream, route_name: String) -> syn::Result<Self> {
+    pub fn parse(tokens: proc_macro2::TokenStream) -> syn::Result<Self> {
         let mut map = HashMap::<String, String>::new();
         let mut buf = Vec::<String>::new();
 
@@ -135,10 +136,6 @@ impl RouteInfo {
         };
 
         Ok(RouteInfo {
-            path: map
-                .get("path")
-                .cloned()
-                .unwrap_or(format!("/{}", route_name.to_lowercase())),
             is_idempotent: map
                 .get("idempotent")
                 .cloned()
@@ -148,6 +145,10 @@ impl RouteInfo {
                     tokens.span(),
                     "Value 'idempotent' must be a boolean",
                 )))?,
+            auth: map
+                .get("auth")
+                .map(|a| format_ident!("{}", a))
+                .expect("No auth handler provided"),
         })
     }
 }

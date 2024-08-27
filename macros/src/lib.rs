@@ -1,5 +1,9 @@
+use std::env;
+
+use heck::AsSnekCase;
 use helpers::{get_inner_type, preamble, RouteInfo};
 use proc_macro::TokenStream;
+use quote::format_ident;
 use syn::{parse_macro_input, DeriveInput};
 
 mod helpers;
@@ -12,8 +16,8 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
     let (_, name, _, arg, _, ret, _, _) =
     (meta.0, meta.1, meta.2, meta.3, meta.4, meta.5, meta.6, meta.7);
     
-    let info = RouteInfo::parse(annot.into(), name.to_string()).unwrap();
-    let (path, idempotent) = (info.path, info.is_idempotent);
+    let info = RouteInfo::parse(annot.into()).unwrap();
+    let (idempotent, auth) = (info.is_idempotent, info.auth);
 
     let method = match idempotent {
         true => "PUT",
@@ -25,22 +29,25 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
 
     let base: proc_macro2::TokenStream = item.into();
     quote::quote! {
-        #[doc = concat!("Endpoint Struct for [", stringify!(#name) ,"]\n@ ", stringify!(#method), " /", stringify!(#path), " -> ", stringify!(#struct_name), "::Data ([", stringify!(#ret), "])")]
+        #[doc = concat!("Endpoint Struct for [", stringify!(#name) ,"]\n@ ", stringify!(#method), " -> ", stringify!(#struct_name), "::Data ([", stringify!(#ret), "])")]
         pub struct #struct_name;
 
         impl Endpoint for #struct_name {
             type Data = #arg;
             type Returns = #ret;
 
-            fn path() -> String { #path.to_string() }
             fn is_idempotent() -> bool { #idempotent }
 
-            fn handler() -> AsyncPtr<Self::Data, anyhow::Result<Self::Returns>> {
-                AsyncPtr::<Self::Data, anyhow::Result<Self::Returns>>::new(#name)
+            fn auth() -> Box<dyn Fn(hyper::HeaderMap) -> futures::future::BoxFuture<'static, bool> + 'static + Send> {
+                Box::new(move |i: hyper::HeaderMap| Box::pin(#auth(i)))
+            }
+            
+            fn handler() -> Box<dyn Fn(Self::Data) -> futures::future::BoxFuture<'static, anyhow::Result<Self::Returns>> + 'static + Send> {
+                Box::new(move |i: Self::Data| Box::pin(#name(i)))
             }
         }
 
-        #[doc(r"Endpoint Handler for [#name]\n@ #method /#name -> #struct_name::Data ([#arg])")]
+        #[doc(r"Endpoint Handler for [#name]\n@ #method -> #struct_name::Data ([#arg])")]
         #base
         
     }
@@ -49,38 +56,100 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 
-#[proc_macro_derive(Router)]
+#[proc_macro_derive(Router, attributes(path, assets))]
 pub fn router(item: TokenStream) -> TokenStream {
-    let (_, name, data) = preamble(parse_macro_input!(item as DeriveInput));
+    let (input, name, data) = preamble(parse_macro_input!(item as DeriveInput));
     
+    let assets = input.attrs.iter().find(|a| a.path().is_ident("assets")).map(|v| v.parse_args::<syn::LitStr>().expect("Assets folder should be a literal string")).map(|v| format!("{}/{}", env::current_dir().map(|d| d.display().to_string()).unwrap_or_default(), v.value())).expect("No assets folder provided");
     let paths: Vec<proc_macro2::TokenStream> = data.variants.iter().map(|variant| {
+
+        let path = format_ident!("{}", AsSnekCase(variant.ident.to_string()).to_string());
         let inner = &variant.fields.iter().next().expect(&format!("No endpoint specified for {}", variant.ident)).ty;
         let inner_name = &variant.ident;
         
         quote::quote! {
-            (path, i) if i == #inner::is_idempotent() && path == #inner::path() => ({
+            (#path, i) if i == #inner::is_idempotent() => ({
+                if !(#inner::auth())(headers).await {
+                    log::debug!(concat!("[-] 401 Unauthorized /", stringify!(#path)));
+                    return hyper::Response::builder()
+                        .status(401)
+                        .body(Body::from(format!("You aren't authorized to access this endpoint. If you believe this is a mistake, talk to your RMHedge Contact")).full())
+                        .unwrap()
+                }
+
                 let bytes = req.collect().await.expect(&format!("Failed to read incoming bytes for {}", stringify!(#inner_name))).to_bytes();
                 let body: <#inner as Endpoint>::Data = serde_json::from_str(&String::from_utf8_lossy(&bytes[..]).to_string()).expect(&format!("Failed to deserialize body for {}", stringify!(#inner_name)));
-                match #inner::handler().run(body).await {
+                match (#inner::handler())(body).await {
                     Ok(response) => {
                         let bytes = serde_json::to_string(&response).expect(&format!("Failed to serialize response for {}", stringify!(#inner_name)));
+                        
+                        log::debug!(concat!("[+] 200 Ok /", stringify!(#path)));
                         return hyper::Response::builder()
-                            .status(200)
-                            .body(http_body_util::Full::new(bytes::Bytes::from(bytes)))
-                            .unwrap()
+                        .status(200)
+                        .body(Body::from(bytes).full())
+                        .unwrap()
                     },
-                    Err(e) => 
+                    Err(e) => {
+                        log::debug!(concat!("[-] 400 Bad Request /", stringify!(#path)));
                         return hyper::Response::builder()
                             .status(400)
-                            .body(http_body_util::Full::new(bytes::Bytes::from(e.to_string())))
+                            .body(Body::from(e.to_string()).full())
                             .unwrap()
+                    }
                 };
-            })
+            }),
         }
 
     }).collect::<Vec<_>>();
 
     TokenStream::from(quote::quote! {
+
+        const __ASSETS: std::sync::LazyLock<std::collections::BTreeMap::<String, (String, &'static [u8])>> = std::sync::LazyLock::new(|| {
+            use std::io::Read;
+            let folder = std::path::PathBuf::from(stringify!(#assets));
+            let mut assets = std::collections::BTreeMap::<String, (String, &'static [u8])>::new();
+            
+            if !folder.exists() {
+                panic!(concat!("Invalid asset folder: ", stringify!(#assets)));
+            }
+
+            walkdir::WalkDir::new(folder.clone())
+                .into_iter()
+                .filter_map(|e| match e {
+                    Err(_) => None,
+                    Ok(f) => f.metadata().unwrap().is_file().then_some(f),
+                })
+                .for_each(|entry| {
+                    let route = entry
+                        .path()
+                        .display()
+                        .to_string()
+                        .strip_prefix(&format!("{}/", folder.display().to_string()))
+                        .unwrap()
+                        .to_string();
+
+                    let mut byt = Vec::new();
+                    std::fs::File::open(entry.path())
+                        .unwrap()
+                        .read_to_end(&mut byt)
+                        .unwrap();
+
+                    let byt = Box::leak(Box::new(byt));
+                    println!("[#] Loaded local asset {}", route);
+
+                    assets.insert(
+                        route.clone(),
+                        (
+                            mime_guess::from_path(route)
+                                .first_or_text_plain()
+                                .to_string(),
+                            byt,
+                        ),
+                    );
+                });
+
+            assets
+        });
 
         impl #name {
             pub async fn route(req: hyper::Request<hyper::body::Incoming>) -> std::result::Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, std::convert::Infallible> {
@@ -88,14 +157,31 @@ pub fn router(item: TokenStream) -> TokenStream {
                 use std::error::Error;
 
                 let path = req.uri().path().to_string();
+                let path = path.strip_prefix("/").map(|v| v.to_string()).unwrap_or(path);
+
+                let headers = req.headers().clone();
+
+                if let Some(file) = __ASSETS.get(&path) {
+                    log::debug!("[#] 200 Ok (File) /{}", path);
+                    return Ok(
+                        hyper::Response::builder()
+                            .status(200)
+                            .header("Content-Type", file.0.to_string())
+                            .body(Body::from(file.1).full())
+                            .unwrap()
+                    )
+                }
 
                 Ok(match tokio::task::spawn(async move {
                     match (path, req.method().is_idempotent()) {
-                        #(#paths)*,
-                        _ => return hyper::Response::builder()
+                        #(#paths)*
+                        path => {
+                            log::debug!("[?] 404 Not Found /{}", path.0);
+                            return hyper::Response::builder()
                                 .status(404)
-                                .body(http_body_util::Full::default())
+                                .body(Body::default().full())
                                 .unwrap()
+                        }
                     }
                 }).await {
                     Ok(inner) => inner,
@@ -111,7 +197,7 @@ pub fn router(item: TokenStream) -> TokenStream {
                             
                         hyper::Response::builder()
                             .status(500)
-                            .body(http_body_util::Full::new(bytes::Bytes::from(format!("{:?}", value))))
+                            .body(Body::from(format!("{:?}", err)).full())
                             .unwrap()
                     }
                 })
