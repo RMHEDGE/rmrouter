@@ -7,12 +7,16 @@ use syn::{
     Block, Data, DataEnum, DeriveInput, Generics, Ident, Token, Type, Visibility, WhereClause,
 };
 
+pub fn unit() -> Type {
+    syn::parse_str("()").unwrap()
+}
+
 pub struct Meta(
     pub Visibility,
     pub Ident,
     pub Generics,
-    pub Type,
-    pub Ident,
+    pub Option<Type>,
+    pub Option<Ident>,
     pub Type,
     pub Option<WhereClause>,
     pub Block,
@@ -34,9 +38,12 @@ impl Parse for Meta {
 
         let content;
         let _ = syn::parenthesized!(content in input);
-        let arg_name = content.parse::<Ident>()?;
-        let _ = content.parse::<Token![:]>()?;
-        let arg = content.parse::<Type>()?;
+        let arg_name = content.parse::<Ident>().ok();
+        let _ = content.parse::<Token![:]>();
+        let arg = arg_name
+            .is_some()
+            .then(|| content.parse::<Type>().ok())
+            .flatten();
 
         let _ = input.parse::<Token![->]>()?;
         let ret = input.parse::<Type>()?;

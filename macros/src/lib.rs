@@ -1,7 +1,7 @@
 use std::env;
 
 use heck::AsSnekCase;
-use helpers::{get_inner_type, preamble, RouteInfo};
+use helpers::{get_inner_type, preamble, RouteInfo, unit};
 use proc_macro::TokenStream;
 use quote::format_ident;
 use syn::{parse_macro_input, DeriveInput};
@@ -13,8 +13,11 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
     let it = item.clone();
     let meta = parse_macro_input!(it as helpers::Meta);
     
-    let (_, name, _, arg, _, ret, _, _) =
+    let (_, name, _, arg, arg_name, ret, _, block) =
     (meta.0, meta.1, meta.2, meta.3, meta.4, meta.5, meta.6, meta.7);
+
+    let arg = arg.unwrap_or(unit());
+    let arg_name = arg_name.unwrap_or(format_ident!("_"));
     
     let info = RouteInfo::parse(annot.into()).unwrap();
     let (idempotent, auth) = (info.is_idempotent, info.auth);
@@ -24,17 +27,16 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
         false => "POST"
     };
 
-    let ret = get_inner_type(ret);
+    let inner_ret = get_inner_type(ret.clone());
     let struct_name = quote::format_ident!("Endpoint{}{}", name.to_string().split_at(1).0.to_uppercase(), name.to_string().split_at(1).1);
 
-    let base: proc_macro2::TokenStream = item.into();
     quote::quote! {
         #[doc = concat!("Endpoint Struct for [", stringify!(#name) ,"]\n@ ", stringify!(#method), " -> ", stringify!(#struct_name), "::Data ([", stringify!(#ret), "])")]
         pub struct #struct_name;
 
         impl Endpoint for #struct_name {
             type Data = #arg;
-            type Returns = #ret;
+            type Returns = #inner_ret;
 
             fn is_idempotent() -> bool { #idempotent }
 
@@ -48,7 +50,10 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         #[doc(r"Endpoint Handler for [#name]\n@ #method -> #struct_name::Data ([#arg])")]
-        #base
+        
+        pub async fn #name(#arg_name: #arg) -> #ret {
+            #block
+        }
         
     }
     .into()
@@ -68,7 +73,7 @@ pub fn router(item: TokenStream) -> TokenStream {
         let inner_name = &variant.ident;
         
         quote::quote! {
-            (#path, i) if i == #inner::is_idempotent() => ({
+            (stringify!(#path), i) if i == #inner::is_idempotent() => ({
                 if !(#inner::auth())(headers).await {
                     log::debug!(concat!("[-] 401 Unauthorized /", stringify!(#path)));
                     return hyper::Response::builder()
@@ -77,17 +82,25 @@ pub fn router(item: TokenStream) -> TokenStream {
                         .unwrap()
                 }
 
-                let bytes = req.collect().await.expect(&format!("Failed to read incoming bytes for {}", stringify!(#inner_name))).to_bytes();
-                let body: <#inner as Endpoint>::Data = serde_json::from_str(&String::from_utf8_lossy(&bytes[..]).to_string()).expect(&format!("Failed to deserialize body for {}", stringify!(#inner_name)));
+                let body: std::boxed::Box<dyn std::any::Any> = match std::any::type_name::<<#inner as Endpoint>::Data>() {
+                    "()" => std::boxed::Box::new(()),
+                    _ => {
+                        let bytes = req.collect().await.expect(&format!("Failed to read incoming bytes for {}", stringify!(#inner_name))).to_bytes();
+                        std::boxed::Box::new(serde_json::from_str::<<#inner as Endpoint>::Data>(&String::from_utf8_lossy(&bytes[..]).to_string()).expect(&format!("Failed to deserialize body for {}", stringify!(#inner_name))))
+                    }
+                };
+
+                let body: <#inner as Endpoint>::Data = *body.downcast::<<#inner as Endpoint>::Data>().unwrap();
+                
                 match (#inner::handler())(body).await {
                     Ok(response) => {
                         let bytes = serde_json::to_string(&response).expect(&format!("Failed to serialize response for {}", stringify!(#inner_name)));
                         
                         log::debug!(concat!("[+] 200 Ok /", stringify!(#path)));
                         return hyper::Response::builder()
-                        .status(200)
-                        .body(Body::from(bytes).full())
-                        .unwrap()
+                            .status(200)
+                            .body(Body::from(bytes).full())
+                            .unwrap()
                     },
                     Err(e) => {
                         log::debug!(concat!("[-] 400 Bad Request /", stringify!(#path)));
@@ -158,6 +171,7 @@ pub fn router(item: TokenStream) -> TokenStream {
 
                 let path = req.uri().path().to_string();
                 let path = path.strip_prefix("/").map(|v| v.to_string()).unwrap_or(path);
+                log::debug!("{}", path);
 
                 let headers = req.headers().clone();
 
@@ -185,7 +199,7 @@ pub fn router(item: TokenStream) -> TokenStream {
                 }
 
                 Ok(match tokio::task::spawn(async move {
-                    match (path, req.method().is_idempotent()) {
+                    match (path.as_str(), req.method().is_idempotent()) {
                         #(#paths)*
                         path => {
                             log::debug!("[?] 404 Not Found /{}", path.0);

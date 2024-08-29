@@ -3,7 +3,7 @@ use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use log::{info, warn};
 use router::*;
-use std::{env, thread};
+use std::{env, thread, time::Instant};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -53,8 +53,14 @@ pub async fn add(data: (i32, i32)) -> Result<i32> {
     Ok(data.0 + data.1)
 }
 
+#[endpoint(auth = NOAUTH)]
+pub async fn now() -> Result<String> {
+    Ok(format!("{:?}", Instant::now()))
+}
+
 #[derive(Router)]
 #[assets("assets")]
 pub enum Router {
     Sum(EndpointAdd),
+    Now(EndpointNow),
 }
