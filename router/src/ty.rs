@@ -99,11 +99,11 @@ impl From<String> for Body {
     }
 }
 
-impl From<&'static [u8]> for Body {
-    fn from(value: &'static [u8]) -> Self {
+impl<'a> From<&'a [u8]> for Body {
+    fn from(value: &'a [u8]) -> Self {
         Body {
             _marker: PhantomData,
-            data: Some(value.into())
+            data: Some(Bytes::from_iter(value.iter().cloned())),
         }
     }
 }

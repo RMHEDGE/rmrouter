@@ -100,7 +100,7 @@ impl Endpoint for EndpointAdd {
 pub async fn add(data: (i32, i32)) -> Result<i32> {
     Ok(data.0 + data.1)
 }
-#[assets("./assets")]
+#[assets("assets")]
 pub enum Router {
     Sum(EndpointAdd),
 }
@@ -108,11 +108,29 @@ const __ASSETS: std::sync::LazyLock<
     std::collections::BTreeMap<String, (String, &'static [u8])>,
 > = std::sync::LazyLock::new(|| {
     use std::io::Read;
-    let folder = std::path::PathBuf::from("\"./assets\"");
+    let folder = std::path::PathBuf::from("/home/flora/rmrouter/assets");
     let mut assets = std::collections::BTreeMap::<
         String,
         (String, &'static [u8]),
     >::new();
+    {
+        let lvl = ::log::Level::Info;
+        if lvl <= ::log::STATIC_MAX_LEVEL && lvl <= ::log::max_level() {
+            ::log::__private_api::log(
+                (/*ERROR*/),
+                lvl,
+                &("router", "router", ::log::__private_api::loc()),
+                (),
+            );
+        }
+    };
+    if !folder.exists() {
+        {
+            ::core::panicking::panic_fmt(
+                format_args!("Invalid asset folder: /home/flora/rmrouter/assets"),
+            );
+        };
+    }
     walkdir::WalkDir::new(folder.clone())
         .into_iter()
         .filter_map(|e| match e {
@@ -155,7 +173,44 @@ impl Router {
         use http_body_util::BodyExt;
         use std::error::Error;
         let path = req.uri().path().to_string();
+        let path = path.strip_prefix("/").map(|v| v.to_string()).unwrap_or(path);
         let headers = req.headers().clone();
+        if let Some(file) = __ASSETS.get(&path) {
+            {
+                let lvl = ::log::Level::Debug;
+                if lvl <= ::log::STATIC_MAX_LEVEL && lvl <= ::log::max_level() {
+                    ::log::__private_api::log(
+                        format_args!("[#] 200 Ok (File) /{0}", path),
+                        lvl,
+                        &("router", "router", ::log::__private_api::loc()),
+                        (),
+                    );
+                }
+            };
+            return Ok(
+                hyper::Response::builder()
+                    .status(200)
+                    .header("Content-Type", file.0.to_string())
+                    .body(
+                        match std::env::var("RM_LOCAL").is_ok() {
+                            true => Body::from(file.1).full(),
+                            false => {
+                                use std::io::Read;
+                                let mut byt = Vec::new();
+                                std::fs::File::open(
+                                        std::path::PathBuf::from("/home/flora/rmrouter/assets")
+                                            .join(path),
+                                    )
+                                    .unwrap()
+                                    .read_to_end(&mut byt)
+                                    .unwrap();
+                                Body::from(byt.as_slice()).full()
+                            }
+                        },
+                    )
+                    .unwrap(),
+            );
+        }
         Ok(
             match tokio::task::spawn(async move {
                     match (path, req.method().is_idempotent()) {

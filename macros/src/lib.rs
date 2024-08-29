@@ -104,13 +104,14 @@ pub fn router(item: TokenStream) -> TokenStream {
 
     TokenStream::from(quote::quote! {
 
-        const __ASSETS: std::sync::LazyLock<std::collections::BTreeMap::<String, (String, &'static [u8])>> = std::sync::LazyLock::new(|| {
+        static __ASSETS: std::sync::LazyLock<std::collections::BTreeMap::<String, (String, &'static [u8])>> = std::sync::LazyLock::new(|| {
             use std::io::Read;
-            let folder = std::path::PathBuf::from(stringify!(#assets));
+            let folder = std::path::PathBuf::from(#assets);
             let mut assets = std::collections::BTreeMap::<String, (String, &'static [u8])>::new();
-            
+            log::info!("[#] Collating local assets");
+
             if !folder.exists() {
-                panic!(concat!("Invalid asset folder: ", stringify!(#assets)));
+                panic!(concat!("Invalid asset folder: ", #assets));
             }
 
             walkdir::WalkDir::new(folder.clone())
@@ -135,8 +136,7 @@ pub fn router(item: TokenStream) -> TokenStream {
                         .unwrap();
 
                     let byt = Box::leak(Box::new(byt));
-                    println!("[#] Loaded local asset {}", route);
-
+                    log::debug!("[#] Serving asset: {}", route);
                     assets.insert(
                         route.clone(),
                         (
@@ -167,7 +167,19 @@ pub fn router(item: TokenStream) -> TokenStream {
                         hyper::Response::builder()
                             .status(200)
                             .header("Content-Type", file.0.to_string())
-                            .body(Body::from(file.1).full())
+                            .body(match std::env::var("RM_LOCAL").is_ok() {
+                                false => Body::from(file.1).full(),
+                                true => {
+                                    use std::io::Read;
+                                    let mut byt = Vec::new();
+                                    std::fs::File::open(std::path::PathBuf::from(#assets).join(path))
+                                        .unwrap()
+                                        .read_to_end(&mut byt)
+                                        .unwrap();
+
+                                    Body::from(byt.as_slice()).full() 
+                                }
+                            })
                             .unwrap()
                     )
                 }

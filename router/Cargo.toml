@@ -11,6 +11,7 @@ futures = "0.3.30"
 http-body-util = "0.1.2"
 hyper = { version = "1.4.1", features = ["full"] }
 hyper-util = { version = "0.1.7", features = ["full"] }
+lazy_static = "1.5.0"
 log = "0.4.22"
 mime_guess = "2.0.5"
 pretty_env_logger = "0.5.0"
