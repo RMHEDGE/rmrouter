@@ -7,7 +7,7 @@ use anyhow::Result;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use log::{info, warn};
-use router::*;
+use router::{endpoint, Body, Endpoint, IOTypeNotSend, Router};
 use std::{env, thread, time::Instant};
 use tokio::net::TcpListener;
 pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -70,20 +70,20 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 /**Endpoint Struct for [add]
-@ "POST" -> EndpointAdd::Data ([Result < i32 >])*/
+@ "PUT" -> EndpointAdd::Data ([Result < i32 >])*/
 pub struct EndpointAdd;
 impl Endpoint for EndpointAdd {
     type Data = (i32, i32);
     type Returns = i32;
     fn is_idempotent() -> bool {
-        false
+        true
     }
     fn auth() -> Box<
         dyn Fn(
             hyper::HeaderMap,
         ) -> futures::future::BoxFuture<'static, bool> + 'static + Send,
     > {
-        Box::new(move |i: hyper::HeaderMap| Box::pin(NOAUTH(i)))
+        Box::new(move |i: hyper::HeaderMap| Box::pin(router::NOAUTH(i)))
     }
     fn handler() -> Box<
         dyn Fn(
@@ -101,20 +101,20 @@ pub async fn add(data: (i32, i32)) -> Result<i32> {
     { Ok(data.0 + data.1) }
 }
 /**Endpoint Struct for [now]
-@ "POST" -> EndpointNow::Data ([Result < String >])*/
+@ "PUT" -> EndpointNow::Data ([Result < String >])*/
 pub struct EndpointNow;
 impl Endpoint for EndpointNow {
     type Data = ();
     type Returns = String;
     fn is_idempotent() -> bool {
-        false
+        true
     }
     fn auth() -> Box<
         dyn Fn(
             hyper::HeaderMap,
         ) -> futures::future::BoxFuture<'static, bool> + 'static + Send,
     > {
-        Box::new(move |i: hyper::HeaderMap| Box::pin(NOAUTH(i)))
+        Box::new(move |i: hyper::HeaderMap| Box::pin(router::NOAUTH(i)))
     }
     fn handler() -> Box<
         dyn Fn(

@@ -2,7 +2,7 @@ use anyhow::Result;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use log::{info, warn};
-use router::*;
+use router::{endpoint, Body, Endpoint, IOTypeNotSend, Router};
 use std::{env, thread, time::Instant};
 use tokio::net::TcpListener;
 
@@ -48,12 +48,12 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-#[endpoint(auth = NOAUTH)]
+#[endpoint(idempotent, auth = router::NOAUTH)]
 pub async fn add(data: (i32, i32)) -> Result<i32> {
     Ok(data.0 + data.1)
 }
 
-#[endpoint(auth = NOAUTH)]
+#[endpoint(idempotent = "true", auth = router::NOAUTH)]
 pub async fn now() -> Result<String> {
     Ok(format!("{:?}", Instant::now()))
 }
@@ -61,6 +61,6 @@ pub async fn now() -> Result<String> {
 #[derive(Router)]
 #[assets("assets")]
 pub enum Router {
-    Sum(EndpointAdd),
+    Sum,
     Now(EndpointNow),
 }

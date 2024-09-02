@@ -3,10 +3,23 @@ use std::env;
 use heck::AsSnekCase;
 use helpers::{get_inner_type, preamble, RouteInfo, unit};
 use proc_macro::TokenStream;
-use quote::format_ident;
+use quote::{format_ident, ToTokens};
 use syn::{parse_macro_input, DeriveInput};
 
 mod helpers;
+
+macro_rules! err {
+    ($result:expr) => {
+        match $result {
+            Err(e) => return e.into_compile_error().into(),
+            Ok(e) => e,
+        }
+    };
+}
+
+fn strip(a: &str) -> String {
+    a.strip_prefix("\"").map(|b| b.strip_suffix("\"")).flatten().map(|v| v.to_string()).unwrap_or(a.to_string())
+}
 
 #[proc_macro_attribute]
 pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
@@ -18,8 +31,8 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
 
     let arg = arg.unwrap_or(unit());
     let arg_name = arg_name.unwrap_or(format_ident!("_"));
-    
-    let info = RouteInfo::parse(annot.into()).unwrap();
+
+    let info = err!(RouteInfo::parse(annot.into()));
     let (idempotent, auth) = (info.is_idempotent, info.auth);
 
     let method = match idempotent {
@@ -50,7 +63,6 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         #[doc(r"Endpoint Handler for [#name]\n@ #method -> #struct_name::Data ([#arg])")]
-        
         pub async fn #name(#arg_name: #arg) -> #ret {
             #block
         }
@@ -65,11 +77,35 @@ pub fn endpoint(annot: TokenStream, item: TokenStream) -> TokenStream {
 pub fn router(item: TokenStream) -> TokenStream {
     let (input, name, data) = preamble(parse_macro_input!(item as DeriveInput));
     
-    let assets = input.attrs.iter().find(|a| a.path().is_ident("assets")).map(|v| v.parse_args::<syn::LitStr>().expect("Assets folder should be a literal string")).map(|v| format!("{}/{}", env::current_dir().map(|d| d.display().to_string()).unwrap_or_default(), v.value())).expect("No assets folder provided");
+    let assets = input.attrs.iter().find(|a| a.path().is_ident("assets"));
+    let assets = assets.map(|a| {
+        err!(a.parse_args::<syn::LitStr>()
+            .map(|a| a.to_token_stream())
+            .map_err(|_| syn::Error::new_spanned(a.into_token_stream(), "Assets attribute should be a literal string")))
+    });
+
+    let assets = assets
+        .map(|a| format!(
+            "{}/{}",
+                env::current_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default(),
+                strip(&a.to_string())
+            ));
+
+
+    let assets = err!(assets.ok_or(
+        syn::Error::new_spanned(name.to_token_stream(), "Missing #[assets()] attribute")
+    ));
+
     let paths: Vec<proc_macro2::TokenStream> = data.variants.iter().map(|variant| {
 
         let path = format_ident!("{}", AsSnekCase(variant.ident.to_string()).to_string());
-        let inner = &variant.fields.iter().next().expect(&format!("No endpoint specified for {}", variant.ident)).ty;
+        let inner = &variant.fields
+            .iter()
+            .next()
+            .expect(&format!("No endpoint specified for {}", variant.ident)).ty;
+        
         let inner_name = &variant.ident;
         
         quote::quote! {
@@ -171,8 +207,6 @@ pub fn router(item: TokenStream) -> TokenStream {
 
                 let path = req.uri().path().to_string();
                 let path = path.strip_prefix("/").map(|v| v.to_string()).unwrap_or(path);
-                log::debug!("{}", path);
-
                 let headers = req.headers().clone();
 
                 if let Some(file) = __ASSETS.get(&path) {
