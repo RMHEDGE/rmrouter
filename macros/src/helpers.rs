@@ -67,7 +67,7 @@ pub fn preamble(input: DeriveInput) -> (DeriveInput, Ident, DataEnum) {
 pub fn get_inner_type(t: Type) -> Type {
     match t {
         Type::Path(p) => {
-            let ty = match p.path.segments.first().unwrap().arguments.clone() {
+            let ty = match p.path.segments.last().unwrap().arguments.clone() {
                 syn::PathArguments::AngleBracketed(t) => t,
                 _ => panic!("Unexpected path arguments"),
             }

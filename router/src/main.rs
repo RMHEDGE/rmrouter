@@ -2,9 +2,25 @@ use anyhow::Result;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use log::{info, warn};
-use router::{endpoint, Body, Endpoint, IOTypeNotSend, Router};
-use std::{env, thread, time::Instant};
+use reqwest;
+use router::{endpoint, wasm_utils, Body, Endpoint, Fetch, IOTypeNotSend, Router, FetchRequest};
+use std::{env, thread};
 use tokio::net::TcpListener;
+
+macro_rules! header {
+    ($h:literal) => {
+        __HEADERS
+            .read()
+            .unwrap()
+            .get(&std::thread::current().id())
+            .map(|l| {
+                l.get($h)
+                    .map(|h| h.to_str().map(|s| s.to_string()).ok())
+                    .flatten()
+            })
+            .flatten()
+    };
+}
 
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -49,18 +65,19 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[endpoint(idempotent, auth = router::NOAUTH)]
-pub async fn add(data: (i32, i32)) -> Result<i32> {
+pub async fn add(data: (i32, i32)) -> anyhow::Result<i32> {
     Ok(data.0 + data.1)
 }
-
-#[endpoint(idempotent = "true", auth = router::NOAUTH)]
-pub async fn now() -> Result<String> {
-    Ok(format!("{:?}", Instant::now()))
+pub fn generate_html() -> String {
+    r"<body>This is a valid* HTML file</body>".to_string()
 }
 
 #[derive(Router)]
 #[assets("assets")]
+#[html(generate_html)]
 pub enum Router {
-    Sum,
-    Now(EndpointNow),
+    Sum(EndpointAdd),
+}
+
+async fn abc() {
 }

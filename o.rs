@@ -7,8 +7,11 @@ use anyhow::Result;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use log::{info, warn};
-use router::{endpoint, Body, Endpoint, IOTypeNotSend, Router};
-use std::{env, thread, time::Instant};
+use reqwest;
+use router::{
+    endpoint, wasm_utils, Body, Endpoint, Fetch, IOTypeNotSend, Router, FetchRequest,
+};
+use std::{env, thread};
 use tokio::net::TcpListener;
 pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let body = async {
@@ -70,7 +73,7 @@ pub async fn server() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 /**Endpoint Struct for [add]
-@ "PUT" -> EndpointAdd::Data ([Result < i32 >])*/
+@ "PUT" -> EndpointAdd::Data ([anyhow :: Result < i32 >])*/
 pub struct EndpointAdd;
 impl Endpoint for EndpointAdd {
     type Data = (i32, i32);
@@ -96,50 +99,94 @@ impl Endpoint for EndpointAdd {
         Box::new(move |i: Self::Data| Box::pin(add(i)))
     }
 }
-#[doc(r"Endpoint Handler for [#name]\n@ #method -> #struct_name::Data ([#arg])")]
-pub async fn add(data: (i32, i32)) -> Result<i32> {
-    { Ok(data.0 + data.1) }
+#[doc("Endpoint Handler for [#name]\n@ #method -> #struct_name::Data ([#arg])")]
+pub async fn add(data: (i32, i32)) -> anyhow::Result<i32> {
+    Ok(data.0 + data.1)
 }
-/**Endpoint Struct for [now]
-@ "PUT" -> EndpointNow::Data ([Result < String >])*/
-pub struct EndpointNow;
-impl Endpoint for EndpointNow {
-    type Data = ();
-    type Returns = String;
-    fn is_idempotent() -> bool {
-        true
-    }
-    fn auth() -> Box<
-        dyn Fn(
-            hyper::HeaderMap,
-        ) -> futures::future::BoxFuture<'static, bool> + 'static + Send,
-    > {
-        Box::new(move |i: hyper::HeaderMap| Box::pin(router::NOAUTH(i)))
-    }
-    fn handler() -> Box<
-        dyn Fn(
-            Self::Data,
-        ) -> futures::future::BoxFuture<
-                'static,
-                anyhow::Result<Self::Returns>,
-            > + 'static + Send,
-    > {
-        Box::new(move |i: Self::Data| Box::pin(now(i)))
-    }
-}
-#[doc(r"Endpoint Handler for [#name]\n@ #method -> #struct_name::Data ([#arg])")]
-pub async fn now(_: ()) -> Result<String> {
-    {
-        Ok({
-            let res = ::alloc::fmt::format(format_args!("{0:?}", Instant::now()));
-            res
-        })
-    }
+pub fn generate_html() -> String {
+    r"<body>This is a valid* HTML file</body>".to_string()
 }
 #[assets("assets")]
+#[html(generate_html)]
 pub enum Router {
     Sum(EndpointAdd),
-    Now(EndpointNow),
+}
+impl Fetch for EndpointAdd {
+    async fn fetch(data: Self::Data) -> anyhow::Result<Self::Returns> {
+        Ok(
+            reqwest::Client::new()
+                .request(
+                    match Self::is_idempotent() {
+                        true => reqwest::Method::PUT,
+                        false => reqwest::Method::POST,
+                    },
+                    {
+                        let res = ::alloc::fmt::format(
+                            format_args!("https://.../{0}", "EndpointAdd"),
+                        );
+                        res
+                    },
+                )
+                .header("Connection", "Keep-Alive")
+                .header("Keep-Alive", "timeout=600")
+                .json(&data)
+                .send()
+                .await?
+                .json::<Self::Returns>()
+                .await?,
+        )
+    }
+    fn fetch_wasm(
+        data: Self::Data,
+        model: std::sync::Arc<impl wasm_utils::utilities::ModelExt>,
+    ) -> futures_signals::signal::Mutable<FetchRequest<Self::Data>> {
+        let signal = futures_signals::signal::Mutable::new(
+            FetchRequest::<Self::Data>::Pending,
+        );
+        wasm_bindgen_futures::spawn_local({
+            let signal = signal.clone();
+            async move {
+                let base_url = web_sys::window().unwrap().origin();
+                match reqwest::Client::new()
+                    .request(
+                        match Self::is_idempotent() {
+                            true => reqwest::Method::PUT,
+                            false => reqwest::Method::POST,
+                        },
+                        {
+                            let res = ::alloc::fmt::format(
+                                format_args!("{1}/api/{0}", "EndpointAdd", base_url),
+                            );
+                            res
+                        },
+                    )
+                    .header("Connection", "Keep-Alive")
+                    .header("Keep-Alive", "timeout=600")
+                    .header(
+                        "Authorization",
+                        {
+                            let res = ::alloc::fmt::format(
+                                format_args!("Bearer {0}", model.get_token().await),
+                            );
+                            res
+                        },
+                    )
+                    .json(&data)
+                    .send()
+                    .await
+                {
+                    Ok(v) => {
+                        match v.json::<Self::Returns>().await {
+                            Ok(v) => signal.set(FetchRequest::<Self::Data>::Ready(v)),
+                            Err(e) => signal.set(FetchRequest::<Self::Data>::Error(e)),
+                        }
+                    }
+                    Err(e) => signal.set(FetchRequest::<Self::Data>::Error(e)),
+                };
+            }
+        });
+        signal
+    }
 }
 static __ASSETS: std::sync::LazyLock<
     std::collections::BTreeMap<String, (String, &'static [u8])>,
@@ -211,6 +258,11 @@ static __ASSETS: std::sync::LazyLock<
         });
     assets
 });
+static __HEADERS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<std::thread::ThreadId, hyper::HeaderMap>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::RwLock::new(std::collections::HashMap::new())
+});
 impl Router {
     pub async fn route(
         req: hyper::Request<hyper::body::Incoming>,
@@ -222,53 +274,56 @@ impl Router {
         use std::error::Error;
         let path = req.uri().path().to_string();
         let path = path.strip_prefix("/").map(|v| v.to_string()).unwrap_or(path);
-        {
-            let lvl = ::log::Level::Debug;
-            if lvl <= ::log::STATIC_MAX_LEVEL && lvl <= ::log::max_level() {
-                ::log::__private_api::log(
-                    format_args!("{0}", path),
-                    lvl,
-                    &("router", "router", ::log::__private_api::loc()),
-                    (),
-                );
-            }
-        };
         let headers = req.headers().clone();
-        if let Some(file) = __ASSETS.get(&path) {
-            {
-                let lvl = ::log::Level::Debug;
-                if lvl <= ::log::STATIC_MAX_LEVEL && lvl <= ::log::max_level() {
-                    ::log::__private_api::log(
-                        format_args!("[#] 200 Ok (File) /{0}", path),
-                        lvl,
-                        &("router", "router", ::log::__private_api::loc()),
-                        (),
-                    );
-                }
-            };
-            return Ok(
-                hyper::Response::builder()
-                    .status(200)
-                    .header("Content-Type", file.0.to_string())
-                    .body(
-                        match std::env::var("RM_LOCAL").is_ok() {
-                            false => Body::from(file.1).full(),
-                            true => {
-                                use std::io::Read;
-                                let mut byt = Vec::new();
-                                std::fs::File::open(
-                                        std::path::PathBuf::from("/home/flora/rmrouter/assets")
-                                            .join(path),
-                                    )
-                                    .unwrap()
-                                    .read_to_end(&mut byt)
-                                    .unwrap();
-                                Body::from(byt.as_slice()).full()
-                            }
-                        },
-                    )
-                    .unwrap(),
-            );
+        __HEADERS
+            .write()
+            .unwrap()
+            .insert(std::thread::current().id(), req.headers().clone());
+        if req.method() == hyper::Method::GET {
+            if let Some(file) = __ASSETS.get(&path) {
+                {
+                    let lvl = ::log::Level::Debug;
+                    if lvl <= ::log::STATIC_MAX_LEVEL && lvl <= ::log::max_level() {
+                        ::log::__private_api::log(
+                            format_args!("[#] 200 Ok (File) /{0}", path),
+                            lvl,
+                            &("router", "router", ::log::__private_api::loc()),
+                            (),
+                        );
+                    }
+                };
+                return Ok(
+                    hyper::Response::builder()
+                        .status(200)
+                        .header("Content-Type", file.0.to_string())
+                        .body(
+                            match std::env::var("RM_LOCAL").is_ok() {
+                                false => Body::from(file.1).full(),
+                                true => {
+                                    use std::io::Read;
+                                    let mut byt = Vec::new();
+                                    std::fs::File::open(
+                                            std::path::PathBuf::from("/home/flora/rmrouter/assets")
+                                                .join(path),
+                                        )
+                                        .unwrap()
+                                        .read_to_end(&mut byt)
+                                        .unwrap();
+                                    Body::from(byt.as_slice()).full()
+                                }
+                            },
+                        )
+                        .unwrap(),
+                );
+            } else {
+                return Ok(
+                    hyper::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "text/html")
+                        .body(Body::from(generate_html()).full())
+                        .unwrap(),
+                )
+            }
         }
         Ok(
             match tokio::task::spawn(async move {
@@ -341,6 +396,10 @@ impl Router {
                                     .unwrap();
                                 match (EndpointAdd::handler())(body).await {
                                     Ok(response) => {
+                                        __HEADERS
+                                            .write()
+                                            .unwrap()
+                                            .remove(&std::thread::current().id());
                                         let bytes = serde_json::to_string(&response)
                                             .expect(
                                                 &{
@@ -369,6 +428,10 @@ impl Router {
                                             .unwrap();
                                     }
                                     Err(e) => {
+                                        __HEADERS
+                                            .write()
+                                            .unwrap()
+                                            .remove(&std::thread::current().id());
                                         {
                                             let lvl = ::log::Level::Debug;
                                             if lvl <= ::log::STATIC_MAX_LEVEL
@@ -376,123 +439,6 @@ impl Router {
                                             {
                                                 ::log::__private_api::log(
                                                     format_args!("[-] 400 Bad Request /sum"),
-                                                    lvl,
-                                                    &("router", "router", ::log::__private_api::loc()),
-                                                    (),
-                                                );
-                                            }
-                                        };
-                                        return hyper::Response::builder()
-                                            .status(400)
-                                            .body(Body::from(e.to_string()).full())
-                                            .unwrap();
-                                    }
-                                };
-                            })
-                        }
-                        ("now", i) if i == EndpointNow::is_idempotent() => {
-                            ({
-                                if !(EndpointNow::auth())(headers).await {
-                                    {
-                                        let lvl = ::log::Level::Debug;
-                                        if lvl <= ::log::STATIC_MAX_LEVEL
-                                            && lvl <= ::log::max_level()
-                                        {
-                                            ::log::__private_api::log(
-                                                format_args!("[-] 401 Unauthorized /now"),
-                                                lvl,
-                                                &("router", "router", ::log::__private_api::loc()),
-                                                (),
-                                            );
-                                        }
-                                    };
-                                    return hyper::Response::builder()
-                                        .status(401)
-                                        .body(
-                                            Body::from({
-                                                    let res = ::alloc::fmt::format(
-                                                        format_args!(
-                                                            "You aren\'t authorized to access this endpoint. If you believe this is a mistake, talk to your RMHedge Contact",
-                                                        ),
-                                                    );
-                                                    res
-                                                })
-                                                .full(),
-                                        )
-                                        .unwrap();
-                                }
-                                let body: std::boxed::Box<dyn std::any::Any> = match std::any::type_name::<
-                                    <EndpointNow as Endpoint>::Data,
-                                >() {
-                                    "()" => std::boxed::Box::new(()),
-                                    _ => {
-                                        let bytes = req
-                                            .collect()
-                                            .await
-                                            .expect(
-                                                &{
-                                                    let res = ::alloc::fmt::format(
-                                                        format_args!("Failed to read incoming bytes for {0}", "Now"),
-                                                    );
-                                                    res
-                                                },
-                                            )
-                                            .to_bytes();
-                                        std::boxed::Box::new(
-                                            serde_json::from_str::<
-                                                <EndpointNow as Endpoint>::Data,
-                                            >(&String::from_utf8_lossy(&bytes[..]).to_string())
-                                                .expect(
-                                                    &{
-                                                        let res = ::alloc::fmt::format(
-                                                            format_args!("Failed to deserialize body for {0}", "Now"),
-                                                        );
-                                                        res
-                                                    },
-                                                ),
-                                        )
-                                    }
-                                };
-                                let body: <EndpointNow as Endpoint>::Data = *body
-                                    .downcast::<<EndpointNow as Endpoint>::Data>()
-                                    .unwrap();
-                                match (EndpointNow::handler())(body).await {
-                                    Ok(response) => {
-                                        let bytes = serde_json::to_string(&response)
-                                            .expect(
-                                                &{
-                                                    let res = ::alloc::fmt::format(
-                                                        format_args!("Failed to serialize response for {0}", "Now"),
-                                                    );
-                                                    res
-                                                },
-                                            );
-                                        {
-                                            let lvl = ::log::Level::Debug;
-                                            if lvl <= ::log::STATIC_MAX_LEVEL
-                                                && lvl <= ::log::max_level()
-                                            {
-                                                ::log::__private_api::log(
-                                                    format_args!("[+] 200 Ok /now"),
-                                                    lvl,
-                                                    &("router", "router", ::log::__private_api::loc()),
-                                                    (),
-                                                );
-                                            }
-                                        };
-                                        return hyper::Response::builder()
-                                            .status(200)
-                                            .body(Body::from(bytes).full())
-                                            .unwrap();
-                                    }
-                                    Err(e) => {
-                                        {
-                                            let lvl = ::log::Level::Debug;
-                                            if lvl <= ::log::STATIC_MAX_LEVEL
-                                                && lvl <= ::log::max_level()
-                                            {
-                                                ::log::__private_api::log(
-                                                    format_args!("[-] 400 Bad Request /now"),
                                                     lvl,
                                                     &("router", "router", ::log::__private_api::loc()),
                                                     (),
@@ -553,3 +499,4 @@ impl Router {
         )
     }
 }
+async fn abc() {}
