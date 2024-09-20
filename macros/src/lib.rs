@@ -168,23 +168,23 @@ pub fn router(item: TokenStream) -> TokenStream {
             impl Fetch for #ident {
 
                 // #[cfg(target_arch = "x86_64")]
-                async fn fetch(data: Self::Data) -> anyhow::Result<Self::Returns> {
-                    Ok(
-                        reqwest::Client::new().request(match Self::is_idempotent() {
-                            true => reqwest::Method::PUT,
-                            false => reqwest::Method::POST
-                        }, format!("https://.../{}", stringify!(#ident)))
-                            .header("Connection", "Keep-Alive")
-                            .header("Keep-Alive", "timeout=600")
-                            .json(&data)
-                            .send().await?
-                            .json::<Self::Returns>().await?
-                    )
-                }
+                // async fn fetch(data: Self::Data) -> anyhow::Result<Self::Returns> {
+                //     Ok(
+                //         reqwest::Client::new().request(match Self::is_idempotent() {
+                //             true => reqwest::Method::PUT,
+                //             false => reqwest::Method::POST
+                //         }, format!("https://.../{}", stringify!(#ident)))
+                //             .header("Connection", "Keep-Alive")
+                //             .header("Keep-Alive", "timeout=600")
+                //             .json(&data)
+                //             .send().await?
+                //             .json::<Self::Returns>().await?
+                //     )
+                // }
 
                 // #[cfg(not(target_arch = "x86_64"))]
-                fn fetch_wasm(data: Self::Data, model: std::sync::Arc<impl wasm_utils::utilities::ModelExt>) -> futures_signals::signal::Mutable<FetchRequest<Self::Data>> {
-                    let signal = futures_signals::signal::Mutable::new(FetchRequest::<Self::Data>::Pending);
+                fn fetch_wasm(data: Self::Data, model: std::sync::Arc<impl wasm_utils::utilities::ModelExt>) -> futures_signals::signal::Mutable<FetchRequest<Self::Returns>> {
+                    let signal = futures_signals::signal::Mutable::new(FetchRequest::<Self::Returns>::Pending);
                     wasm_bindgen_futures::spawn_local({
                         let signal = signal.clone();
                         async move {
@@ -199,10 +199,10 @@ pub fn router(item: TokenStream) -> TokenStream {
                                     .json(&data)
                                     .send().await {
                                         Ok(v) => match v.json::<Self::Returns>().await {
-                                            Ok(v) => signal.set(FetchRequest::<Self::Data>::Ready(v)),
-                                            Err(e) => signal.set(FetchRequest::<Self::Data>::Error(e))
+                                            Ok(v) => signal.set(FetchRequest::<Self::Returns>::Ready(v)),
+                                            Err(e) => signal.set(FetchRequest::<Self::Returns>::Failed(std::sync::Arc::new(anyhow::anyhow!("{}", e))))
                                         },
-                                        Err(e) => signal.set(FetchRequest::<Self::Data>::Error(e))
+                                        Err(e) => signal.set(FetchRequest::<Self::Returns>::Failed(std::sync::Arc::new(anyhow::anyhow!("{}", e))))
                                     };
                         }
                     });

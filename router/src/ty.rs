@@ -51,10 +51,10 @@ use wasm_utils::utilities::*;
 
 pub trait Fetch: Endpoint {
     // #[cfg(target_arch = "x86_64")]
-    fn fetch(data: Self::Data) -> impl Future<Output = anyhow::Result<Self::Returns>>;
+    // fn fetch(data: Self::Data) -> impl Future<Output = anyhow::Result<Self::Returns>>;
     // #[cfg(not(target_arch = "x86_64"))]
     fn fetch_wasm(data: Self::Data, model: Arc<impl ModelExt>)
-        -> Mutable<FetchRequest<Self::Data>>;
+        -> Mutable<FetchRequest<Self::Returns>>;
 }
 
 pub struct IOTypeNotSend {

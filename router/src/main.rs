@@ -78,6 +78,3 @@ pub fn generate_html() -> String {
 pub enum Router {
     Sum(EndpointAdd),
 }
-
-async fn abc() {
-}

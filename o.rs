@@ -112,30 +112,6 @@ pub enum Router {
     Sum(EndpointAdd),
 }
 impl Fetch for EndpointAdd {
-    async fn fetch(data: Self::Data) -> anyhow::Result<Self::Returns> {
-        Ok(
-            reqwest::Client::new()
-                .request(
-                    match Self::is_idempotent() {
-                        true => reqwest::Method::PUT,
-                        false => reqwest::Method::POST,
-                    },
-                    {
-                        let res = ::alloc::fmt::format(
-                            format_args!("https://.../{0}", "EndpointAdd"),
-                        );
-                        res
-                    },
-                )
-                .header("Connection", "Keep-Alive")
-                .header("Keep-Alive", "timeout=600")
-                .json(&data)
-                .send()
-                .await?
-                .json::<Self::Returns>()
-                .await?,
-        )
-    }
     fn fetch_wasm(
         data: Self::Data,
         model: std::sync::Arc<impl wasm_utils::utilities::ModelExt>,
@@ -192,7 +168,9 @@ static __ASSETS: std::sync::LazyLock<
     std::collections::BTreeMap<String, (String, &'static [u8])>,
 > = std::sync::LazyLock::new(|| {
     use std::io::Read;
-    let folder = std::path::PathBuf::from("/home/flora/rmrouter/assets");
+    let folder = std::path::PathBuf::from(
+        "/home/flora/Documents/projects/rmrouter/assets",
+    );
     let mut assets = std::collections::BTreeMap::<
         String,
         (String, &'static [u8]),
@@ -211,7 +189,9 @@ static __ASSETS: std::sync::LazyLock<
     if !folder.exists() {
         {
             ::core::panicking::panic_fmt(
-                format_args!("Invalid asset folder: /home/flora/rmrouter/assets"),
+                format_args!(
+                    "Invalid asset folder: /home/flora/Documents/projects/rmrouter/assets",
+                ),
             );
         };
     }
@@ -303,7 +283,9 @@ impl Router {
                                     use std::io::Read;
                                     let mut byt = Vec::new();
                                     std::fs::File::open(
-                                            std::path::PathBuf::from("/home/flora/rmrouter/assets")
+                                            std::path::PathBuf::from(
+                                                    "/home/flora/Documents/projects/rmrouter/assets",
+                                                )
                                                 .join(path),
                                         )
                                         .unwrap()
